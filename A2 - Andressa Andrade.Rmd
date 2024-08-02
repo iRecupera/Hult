@@ -1,0 +1,221 @@
+
+---
+title: "Sales Forecasting Dashboard"
+
+output:
+  flexdashboard::flex_dashboard:
+    orientation: rows
+    vertical_layout: fill
+    runtime: shiny
+---
+
+```{r setup, include=FALSE}
+# Set CRAN mirror
+options(repos = c(CRAN = "https://cloud.r-project.org"))
+
+# Install packages if not already installed
+packages <- c("flexdashboard", "ggplot2", "shiny", "forecast", "tidyverse", "plotly")
+new_packages <- packages[!(packages %in% installed.packages()[,"Package"])]
+if(length(new_packages)) install.packages(new_packages)
+
+# Load libraries
+library(flexdashboard)
+library(ggplot2)
+library(shiny)
+library(forecast)
+library(tidyverse)
+library(plotly)
+```
+
+```{r loading, include=FALSE}
+# Load data
+fsales <- "https://raw.githubusercontent.com/multidis/hult-inter-bus-reports-r/main/forecasting/sales_weekly.csv"
+sales <- read_csv(fsales)
+
+# Ensure proper data formats
+sales$Week <- as.integer(sales$Week)
+sales$Store <- as.factor(sales$Store)
+
+# Latest (current) week
+nweek_now <- max(sales$Week)
+```
+
+### UI Elements
+
+```{r ui_elements}
+# Create store selection input
+store_choices <- unique(sales$Store)
+
+selectInput("store", "Select Store:",
+            choices = store_choices, selected = store_choices[1])
+
+# UI for forecasting options
+selectInput("forecast_option", "Select Forecast Type:",
+            choices = c("Quarterly Forecast" = "quarterly", "Weekly Forecast" = "weekly"))
+
+# UI for quarter selection
+quarter_input <- sliderInput("quarter", "Select Future Quarter:",
+                             min = 1, max = 8, value = 1)
+
+# UI for week selection
+week_input <- sliderInput("week", "Select Week:",
+                          min = nweek_now + 1, max = nweek_now + 13*3, value = nweek_now + 1)
+
+# UI for confidence intervals
+confidence_input <- sliderInput("confidence_interval", "Select Confidence Interval Level:",
+                                min = 80, max = 95, value = 95, step = 5)
+
+# UI for comparing past and future sales
+comparison_input <- checkboxInput("compare_sales", "Compare Past and Future Sales", value = FALSE)
+```
+
+### Historical Sales Data and Current Week Performance
+
+```{r historical_data}
+# Reactive data based on selected store
+filtered_sales <- reactive({
+  req(input$store)
+  subset(sales, Store == input$store)
+})
+
+# Current week performance indicator
+current_week_sales <- reactive({
+  latest_week_data <- subset(filtered_sales(), Week == nweek_now)
+  forecast_model <- auto.arima(filtered_sales()$Weekly_Sales)
+  current_week_forecast <- forecast(forecast_model, h = 1)$mean
+  c(actual = latest_week_data$Weekly_Sales, forecast = current_week_forecast)
+})
+```
+
+Row {data-height=650}
+-------------------------------------
+
+### Current Week Performance
+
+```{r current_week_performance}
+# Display current week performance indicator
+renderTable({
+  data <- current_week_sales()
+  data.frame(
+    Metric = c("Actual Sales", "Forecast Sales"),
+    Value = c(data["actual"], data["forecast"])
+  )
+})
+```
+
+### Historical Sales Data Table
+
+```{r historical_table}
+# Display historical sales data table
+renderTable({
+  filtered_sales()
+})
+```
+
+### Historical Sales Chart
+
+```{r historical_chart}
+# Display historical sales chart
+renderPlot({
+  data <- filtered_sales()
+  ggplot(data, aes(x = Week, y = Weekly_Sales)) +
+    geom_line() +
+    geom_point() +
+    labs(title = paste("Weekly Sales for Store", input$store),
+         x = "Week", y = "Weekly Sales")
+})
+```
+
+### Sales Forecasting
+
+```{r forecasting}
+# Generate forecast based on selected options
+output$forecast_chart <- renderPlot({
+  req(input$store)
+  store_data <- filtered_sales()
+  
+  forecast_result <- NULL
+  if (input$forecast_option == "quarterly") {
+    quarter_end <- nweek_now + (input$quarter * 13)
+    forecast_data <- subset(store_data, Week >= nweek_now & Week <= quarter_end)
+    if (nrow(forecast_data) > 1) {
+      forecast_model <- auto.arima(forecast_data$Weekly_Sales)
+      forecast_result <- forecast(forecast_model, h = 13 * input$quarter)
+      autoplot(forecast_result) +
+        labs(title = paste("Quarterly Sales Forecast for Store", input$store),
+             x = "Week", y = "Forecasted Sales")
+    } else {
+      plot(1, type = "n", xlab = "Week", ylab = "Forecasted Sales",
+           main = "Insufficient Data for Forecast")
+    }
+  } else if (input$forecast_option == "weekly") {
+    forecast_week <- input$week
+    forecast_data <- subset(store_data, Week <= forecast_week)
+    if (nrow(forecast_data) > 1) {
+      forecast_model <- auto.arima(forecast_data$Weekly_Sales)
+      forecast_result <- forecast(forecast_model, h = 1)
+      autoplot(forecast_result) +
+        labs(title = paste("Weekly Sales Forecast for Store", input$store),
+             x = "Week", y = "Forecasted Sales")
+    } else {
+      plot(1, type = "n", xlab = "Week", ylab = "Forecasted Sales",
+           main = "Insufficient Data for Forecast")
+    }
+  }
+})
+```
+
+### Forecast with Confidence Intervals
+
+```{r confidence_intervals}
+output$confidence_chart <- renderPlot({
+  req(input$store)
+  
+  store_data <- filtered_sales()
+  forecast_model <- auto.arima(store_data$Weekly_Sales)
+  forecast_result <- forecast(forecast_model, h = 4 * 13) # Forecast for 4 months
+  
+  ggplot(forecast_result) +
+    autoplot() +
+    labs(title = paste("Sales Forecast with Confidence Intervals for Store", input$store),
+         x = "Week", y = "Forecasted Sales") +
+    geom_ribbon(aes(ymin = `80%`, ymax = `95%`), alpha = 0.2, fill = "blue")
+})
+```
+
+### Comparison of Past and Future Sales
+
+```{r comparison_sales}
+output$comparison_chart <- renderPlot({
+  req(input$store, input$compare_sales)
+  
+  store_data <- filtered_sales()
+  forecast_model <- auto.arima(store_data$Weekly_Sales)
+  forecast_result <- forecast(forecast_model, h = 52)  # Forecast for 1 year
+  
+  past_data <- store_data %>%
+    filter(Week >= (nweek_now - 52)) %>%
+    mutate(Type = "Past Sales")
+  
+  future_data <- data.frame(
+    Week = (nweek_now + 1):(nweek_now + 52),
+    Weekly_Sales = forecast_result$mean,
+    Type = "Forecast Sales"
+  )
+  
+  combined_data <- rbind(past_data, future_data)
+  
+  ggplot(combined_data, aes(x = Week, y = Weekly_Sales, color = Type)) +
+    geom_line() +
+    labs(title = paste("Comparison of Past and Future Sales for Store", input$store),
+         x = "Week", y = "Sales")
+})
+```
+
+Este código cria um `flexdashboard` interativo com as seguintes funcionalidades personalizadas:
+- **Indicador de Desempenho da Semana Atual**: Mostra as vendas reais e a previsão para a semana atual.
+- **Previsão para o Futuro**: Permite selecionar a previsão para um trimestre futuro ou uma semana específica.
+- **Intervalos de Confiança**: Exibe a previsão com intervalos de confiança para o próximo mês.
+- **Comparação de Vendas**: Compara as vendas semanais do ano passado com as previsões para o próximo ano.
+
+Coloque este código em um arquivo `.Rmd` e execute-o no RStudio para gerar o dashboard interativo.
